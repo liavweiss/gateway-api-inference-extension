@@ -16,9 +16,19 @@ bbr:
 
   # Plugin configuration (transitional - currently runs no-op default plugin)
   plugins:
-    - type: default-bbr
-      name: default-bbr
-      json: {"v":0, "no-op":true}
+    - type: no-op-plugin
+      name: no-op-plugin
+
+  # Request guardrails run before plugins; if any blocks, BBR returns 403.
+  # Example: NeMo Guardrails (requires NeMo service deployed and baseURL reachable from BBR pod).
+  # requestGuardrails:
+  #   - type: nemo-guardrails
+  #     name: default
+  #     json:
+  #       baseURL: "http://nemo-guardrails.nemo-guardrails.svc:8000"
+  #       config_id: "config"
+  #       timeout_seconds: 10
+  requestGuardrails: []
 
 provider:
   name: none

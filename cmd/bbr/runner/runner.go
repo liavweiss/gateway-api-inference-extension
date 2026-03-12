@@ -44,6 +44,7 @@ import (
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/bbr/framework"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/bbr/metrics"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/bbr/plugins"
+	"sigs.k8s.io/gateway-api-inference-extension/pkg/bbr/plugins/guardrails"
 	runserver "sigs.k8s.io/gateway-api-inference-extension/pkg/bbr/server"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/profiling"
@@ -67,6 +68,9 @@ var (
 	// Contains the BBR plugins specs specified via repeated flags:
 	//   --plugin <type>:<name>[:<json>]
 	pluginSpecs config.BBRPluginSpecs
+	// Request guardrails (e.g. nemo-guardrails) run before payload processors; any block returns 403.
+	//   --request-guardrail <type>:<name>[:<json>]
+	requestGuardrailSpecs config.BBRGuardrailSpecs
 )
 
 func NewRunner() *Runner {
@@ -96,6 +100,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	opts.BindFlags(flag.CommandLine)
 
 	flag.Var(&pluginSpecs, "plugin", `Repeatable. --plugin <type>:<name>[:<json>]`)
+	flag.Var(&requestGuardrailSpecs, "request-guardrail", `Repeatable. --request-guardrail <type>:<name>[:<json>] e.g. nemo-guardrails:default:{"baseURL":"http://...","config_id":"config"}`)
 	flag.Parse()
 	initLogging(&opts)
 
@@ -164,8 +169,25 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}
 
-	// Register factories for all known in-tree BBR plugins
+	// Register factories for all known in-tree BBR plugins and guardrails
 	r.registerInTreePlugins()
+	r.registerInTreeGuardrails()
+
+	// Build request guardrails from --request-guardrail flags
+	var requestGuardrails []framework.Guardrail
+	for _, s := range requestGuardrailSpecs {
+		factory, ok := framework.GuardrailRegistry[s.Type]
+		if !ok {
+			setupLog.Error(nil, "unknown request-guardrail type (no factory registered)", "type", s.Type)
+			return fmt.Errorf("unknown request-guardrail type %q", s.Type)
+		}
+		instance, err := factory(s.Name, s.JSON)
+		if err != nil {
+			setupLog.Error(err, "invalid request-guardrail", "type", s.Type, "name", s.Name)
+			return fmt.Errorf("invalid request-guardrail %s#%s: %w", s.Type, s.Name, err)
+		}
+		requestGuardrails = append(requestGuardrails, instance)
+	}
 
 	// Construct BBR plugin instances for the in tree plugins that are (1) registered and (2) requested via the --plugin flags
 	if len(pluginSpecs) == 0 {
@@ -199,11 +221,12 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	// Setup ExtProc Server Runner
 	serverRunner := &runserver.ExtProcServerRunner{
-		GrpcPort:       *grpcPort,
-		Datastore:      ds,
-		SecureServing:  *secureServing,
-		Streaming:      *streaming,
-		RequestPlugins: r.requestPlugins,
+		GrpcPort:          *grpcPort,
+		Datastore:         ds,
+		SecureServing:     *secureServing,
+		Streaming:         *streaming,
+		RequestPlugins:    r.requestPlugins,
+		RequestGuardrails: requestGuardrails,
 	}
 	if err := serverRunner.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to setup BBR controllers")
@@ -234,6 +257,11 @@ func (r *Runner) Run(ctx context.Context) error {
 // registerInTreePlugins registers the factory functions of all known BBR plugins
 func (r *Runner) registerInTreePlugins() {
 	framework.Register(plugins.DefaultPluginType, plugins.DefaultPluginFactory)
+}
+
+// registerInTreeGuardrails registers the factory functions of all known BBR request guardrails
+func (r *Runner) registerInTreeGuardrails() {
+	framework.RegisterGuardrail(guardrails.NemoGuardrailType, guardrails.NemoGuardrailFactory)
 }
 
 // registerHealthServer adds the Health gRPC server as a Runnable to the given manager.

@@ -140,7 +140,7 @@ func TestProcessRequestBody(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.desc, func(t *testing.T) {
-			srv := NewServer(tc.streaming, &fakeDatastore{}, []framework.PayloadProcessor{})
+			srv := NewServer(tc.streaming, &fakeDatastore{}, []framework.PayloadProcessor{}, nil)
 			streamedBody := &streamedBody{}
 			for i, body := range tc.bodys {
 				got, err := srv.processRequestBody(context.Background(), body, streamedBody, log.FromContext(ctx))

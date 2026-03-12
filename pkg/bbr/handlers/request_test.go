@@ -19,11 +19,13 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
 	basepb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/protobuf/testing/protocmp"
 	metricsutils "k8s.io/component-base/metrics/testutil"
@@ -32,6 +34,7 @@ import (
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/bbr/framework"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/bbr/metrics"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
+	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
 )
 
 func TestHandleRequestBody(t *testing.T) {
@@ -268,7 +271,7 @@ func TestHandleRequestBody(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			server := NewServer(test.streaming, &fakeDatastore{}, []framework.PayloadProcessor{})
+			server := NewServer(test.streaming, &fakeDatastore{}, []framework.PayloadProcessor{}, nil)
 			bodyBytes, _ := json.Marshal(test.body)
 			resp, err := server.HandleRequestBody(ctx, bodyBytes)
 			if err != nil {
@@ -308,4 +311,78 @@ func mapToBytes(t *testing.T, m map[string]any) []byte {
 		t.Fatalf("Marshal(): %v", err)
 	}
 	return bytes
+}
+
+// mockGuardrail is a test-only guardrail that returns a fixed allow/err.
+type mockGuardrail struct {
+	allow bool
+	err   error
+}
+
+func (m *mockGuardrail) TypedName() plugin.TypedName {
+	return plugin.TypedName{Type: "mock-guardrail", Name: "test"}
+}
+
+func (m *mockGuardrail) Execute(_ context.Context, _ map[string]string, _ map[string]any) (bool, error) {
+	return m.allow, m.err
+}
+
+func TestHandleRequestBodyGuardrails(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+
+	tests := []struct {
+		name           string
+		guardrail      framework.Guardrail
+		body           map[string]any
+		wantStatusCode envoyTypePb.StatusCode
+		wantBody       string
+	}{
+		{
+			name:           "guardrail blocks with reason — 403 + block message",
+			guardrail:      &mockGuardrail{allow: false, err: fmt.Errorf("unsafe content detected")},
+			body:           map[string]any{"model": "foo", "messages": []any{map[string]any{"role": "user", "content": "bad request"}}},
+			wantStatusCode: envoyTypePb.StatusCode_Forbidden,
+			wantBody:       "unsafe content detected",
+		},
+		{
+			name:           "guardrail blocks without reason — 403 + generic message",
+			guardrail:      &mockGuardrail{allow: false, err: nil},
+			body:           map[string]any{"model": "foo"},
+			wantStatusCode: envoyTypePb.StatusCode_Forbidden,
+		},
+		{
+			name:           "guardrail allows but returns error — 500",
+			guardrail:      &mockGuardrail{allow: true, err: fmt.Errorf("guardrail internal failure")},
+			body:           map[string]any{"model": "foo"},
+			wantStatusCode: envoyTypePb.StatusCode_InternalServerError,
+			wantBody:       "guardrail internal failure",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := NewServer(false, &fakeDatastore{}, []framework.PayloadProcessor{}, []framework.Guardrail{tt.guardrail})
+			bodyBytes, _ := json.Marshal(tt.body)
+			resp, err := server.HandleRequestBody(ctx, bodyBytes)
+			if err != nil {
+				t.Fatalf("HandleRequestBody returned unexpected error: %v", err)
+			}
+			if len(resp) != 1 {
+				t.Fatalf("expected 1 response, got %d", len(resp))
+			}
+			imm, ok := resp[0].Response.(*extProcPb.ProcessingResponse_ImmediateResponse)
+			if !ok {
+				t.Fatalf("expected ImmediateResponse, got %T", resp[0].Response)
+			}
+			if imm.ImmediateResponse.Status.Code != tt.wantStatusCode {
+				t.Errorf("expected status %v, got %v", tt.wantStatusCode, imm.ImmediateResponse.Status.Code)
+			}
+			if tt.wantBody != "" {
+				body := string(imm.ImmediateResponse.Body)
+				if !strings.Contains(body, tt.wantBody) {
+					t.Errorf("expected body to contain %q, got %q", tt.wantBody, body)
+				}
+			}
+		})
+	}
 }

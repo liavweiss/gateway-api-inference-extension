@@ -24,6 +24,7 @@ import (
 
 	basepb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	eppb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/bbr/framework"
@@ -37,6 +38,44 @@ const (
 	baseModelHeader = "X-Gateway-Base-Model-Name"
 )
 
+// createImmediateResponse returns a ProcessingResponse that tells Envoy to respond immediately with status and body.
+func createImmediateResponse(statusCode envoyTypePb.StatusCode, body string) []*eppb.ProcessingResponse {
+	resp := &eppb.ProcessingResponse{
+		Response: &eppb.ProcessingResponse_ImmediateResponse{
+			ImmediateResponse: &eppb.ImmediateResponse{
+				Status: &envoyTypePb.HttpStatus{Code: statusCode},
+			},
+		},
+	}
+	if body != "" {
+		resp.Response.(*eppb.ProcessingResponse_ImmediateResponse).ImmediateResponse.Body = []byte(body)
+	}
+	return []*eppb.ProcessingResponse{resp}
+}
+
+// executeRequestGuardrails runs request guardrails. If any blocks or errors, returns (responses, true) to send immediately; otherwise (nil, false).
+// Blocked: 403; body = err.Error() when plugin returns (false, err), else generic message.
+// Plugin error: 500 with err.Error().
+func (s *Server) executeRequestGuardrails(ctx context.Context, headers map[string]string, body map[string]any) ([]*eppb.ProcessingResponse, bool) {
+	for _, g := range s.requestGuardrails {
+		log.FromContext(ctx).Info("Executing request guardrail", "plugin", g.TypedName())
+		allow, err := g.Execute(ctx, headers, body)
+		if !allow {
+			msg := "Request blocked by guardrail: " + g.TypedName().String()
+			if err != nil {
+				msg = err.Error() // e.g. NeMo block message
+			}
+			log.FromContext(ctx).Info("Request blocked by guardrail", "plugin", g.TypedName())
+			return createImmediateResponse(envoyTypePb.StatusCode_Forbidden, msg), true
+		}
+		if err != nil {
+			log.FromContext(ctx).Error(err, "Guardrail failed", "plugin", g.TypedName())
+			return createImmediateResponse(envoyTypePb.StatusCode_InternalServerError, err.Error()), true
+		}
+	}
+	return nil, false
+}
+
 // HandleRequestBody handles request bodies.
 func (s *Server) HandleRequestBody(ctx context.Context, requestBodyBytes []byte) ([]*eppb.ProcessingResponse, error) {
 	logger := log.FromContext(ctx)
@@ -45,6 +84,13 @@ func (s *Server) HandleRequestBody(ctx context.Context, requestBodyBytes []byte)
 	var requestBody map[string]any
 	if err := json.Unmarshal(requestBodyBytes, &requestBody); err != nil {
 		return nil, err
+	}
+
+	// Run request guardrails first (before model extraction). If any blocks or errors, return immediately.
+	if len(s.requestGuardrails) > 0 {
+		if responses, done := s.executeRequestGuardrails(ctx, map[string]string{}, requestBody); done {
+			return responses, nil
+		}
 	}
 
 	targetModelAny, ok := requestBody["model"]

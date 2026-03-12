@@ -21,12 +21,21 @@ spec:
         args:
         - "--streaming"
         # Pass additional flags via the bbr.flags field in values.yaml.
+        # Use --key=value form so that boolean flags like --secure-serving=false are parsed correctly
+        # by Go's flag package (--flag false does NOT work for booleans — it sets the flag to true).
         {{- range $key, $value := .Values.bbr.flags }}
-        - --{{ $key }}
-        - "{{ $value }}"
+        - "--{{ $key }}={{ $value }}"
         {{- end }}      
         {{- range .Values.bbr.plugins }}
         - --plugin
+        {{- if .json }}
+        - {{ printf "%s:%s:%s" .type .name (toJson .json) | quote }}
+        {{- else }}
+        - {{ printf "%s:%s" .type .name | quote }}
+        {{- end }}
+        {{- end }}
+        {{- range .Values.bbr.requestGuardrails }}
+        - --request-guardrail
         {{- if .json }}
         - {{ printf "%s:%s:%s" .type .name (toJson .json) | quote }}
         {{- else }}

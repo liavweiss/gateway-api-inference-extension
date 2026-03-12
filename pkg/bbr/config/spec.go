@@ -78,3 +78,42 @@ func (p *BBRPluginSpecs) String() string {
 	}
 	return strings.Join(out, " ")
 }
+
+// BBRGuardrailSpecs is a repeatable flag for --request-guardrail <type>:<name>[:<json>].
+// Same format as BBRPluginSpecs.
+type BBRGuardrailSpecs []BBRPluginSpec
+
+func (p *BBRGuardrailSpecs) Set(s string) error {
+	spec := BBRPluginSpec{Raw: s}
+	segments := strings.SplitN(s, ":", 3)
+	if len(segments) < 2 {
+		return errors.New(`usage: --request-guardrail <type>:<name>[:<json>]`)
+	}
+	spec.Type = strings.TrimSpace(segments[0])
+	spec.Name = strings.TrimSpace(segments[1])
+	if spec.Type == "" {
+		return errors.New("request-guardrail type cannot be empty")
+	}
+	if spec.Name == "" {
+		return errors.New("request-guardrail name cannot be empty")
+	}
+	if len(segments) == 3 {
+		jsonSegment := strings.TrimSpace(segments[2])
+		if jsonSegment != "" {
+			if !json.Valid([]byte(jsonSegment)) {
+				return errors.New("invalid json")
+			}
+		}
+		spec.JSON = json.RawMessage(jsonSegment)
+	}
+	*p = append(*p, spec)
+	return nil
+}
+
+func (p *BBRGuardrailSpecs) String() string {
+	out := make([]string, 0, len(*p))
+	for _, s := range *p {
+		out = append(out, s.Raw)
+	}
+	return strings.Join(out, " ")
+}
