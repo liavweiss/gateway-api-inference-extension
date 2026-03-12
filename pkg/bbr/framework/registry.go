@@ -31,3 +31,14 @@ func Register(pluginType string, factory FactoryFunc) {
 
 // Registry is a mapping from plugin name to Factory function
 var Registry map[string]FactoryFunc = map[string]FactoryFunc{}
+
+// GuardrailFactoryFunc creates a Guardrail plugin from name and optional JSON parameters.
+type GuardrailFactoryFunc func(name string, parameters json.RawMessage) (Guardrail, error)
+
+// RegisterGuardrail registers a guardrail factory under the given plugin type.
+func RegisterGuardrail(pluginType string, factory GuardrailFactoryFunc) {
+	GuardrailRegistry[pluginType] = factory
+}
+
+// GuardrailRegistry maps plugin type to Guardrail factory.
+var GuardrailRegistry map[string]GuardrailFactoryFunc = map[string]GuardrailFactoryFunc{}
